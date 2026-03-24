@@ -4,29 +4,49 @@ import { Server as SocketIOServer } from "socket.io";
 import { initSocketServer } from "./src/realtime/socket-server";
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = "localhost";
 const port = parseInt(process.env.PORT || "3000", 10);
+// In production, bind to 0.0.0.0 so the container is reachable.
+// In dev, use localhost to avoid macOS firewall prompts.
+const hostname = dev ? "localhost" : "0.0.0.0";
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
   const httpServer = createServer((req, res) => {
+    // Health check — responds before Next.js to keep cloud providers happy
+    if (req.url === "/api/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
+      return;
+    }
     handle(req, res);
   });
 
+  // CORS: in dev allow localhost, in production allow the configured site URL
+  const allowedOrigins = dev
+    ? [`http://localhost:${port}`, `http://127.0.0.1:${port}`]
+    : process.env.NEXT_PUBLIC_SITE_URL
+      ? [process.env.NEXT_PUBLIC_SITE_URL]
+      : false;
+
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: dev ? `http://${hostname}:${port}` : false,
+      origin: allowedOrigins || false,
+      methods: ["GET", "POST"],
       credentials: true,
     },
     transports: ["websocket", "polling"],
+    // Ping timeout/interval tuning for cloud environments
+    pingTimeout: 30000,
+    pingInterval: 25000,
   });
 
   initSocketServer(io);
 
-  httpServer.listen(port, () => {
+  httpServer.listen(port, hostname, () => {
     console.log(`> Ready on http://${hostname}:${port}`);
+    console.log(`> Environment: ${dev ? "development" : "production"}`);
     console.log(`> Socket.io server ready`);
 
     // Background jobs — process scheduled messages and reminders every 60s
@@ -36,8 +56,8 @@ app.prepare().then(() => {
           "./src/services/scheduled-message.service"
         );
         await processScheduledMessages();
-      } catch (err) {
-        // Silent — scheduled messages table may not exist yet
+      } catch {
+        // Silent — table may not exist yet
       }
     }, 60_000);
 
@@ -47,8 +67,8 @@ app.prepare().then(() => {
           "./src/services/reminder.service"
         );
         await processReminders();
-      } catch (err) {
-        // Silent — reminders table may not exist yet
+      } catch {
+        // Silent — table may not exist yet
       }
     }, 60_000);
 
