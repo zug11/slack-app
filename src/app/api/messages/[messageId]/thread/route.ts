@@ -2,9 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { getMessages } from "@/services/message.service";
 import { handleApiError } from "@/lib/errors";
-import { db } from "@/db";
-import { messages } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function GET(
   request: NextRequest,
@@ -18,17 +17,18 @@ export async function GET(
       ? parseInt(request.nextUrl.searchParams.get("limit")!)
       : 100;
 
-    const [parentMsg] = await db
-      .select({ channelId: messages.channelId })
-      .from(messages)
-      .where(eq(messages.id, messageId))
-      .limit(1);
+    const supabase = createClient(await cookies());
+    const { data: parentMsg } = await supabase
+      .from("messages")
+      .select("channel_id")
+      .eq("id", messageId)
+      .single();
 
     if (!parentMsg) {
       return NextResponse.json({ error: "Message not found" }, { status: 404 });
     }
 
-    const result = await getMessages(parentMsg.channelId, {
+    const result = await getMessages(parentMsg.channel_id, {
       cursor,
       limit,
       threadId: messageId,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSocket } from "@/hooks/use-socket";
+// Supabase Realtime is handled per-component, no global socket needed
 import { usePresence } from "@/hooks/use-presence";
 import { IconSidebar } from "./icon-sidebar";
 import { Sidebar } from "./sidebar";
@@ -43,7 +43,6 @@ export function AppShell({
   conversations: Channel[];
   children: React.ReactNode;
 }) {
-  const { socket } = useSocket();
   const openThreadId = useThreadStore((s) => s.openThreadId);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
@@ -66,31 +65,8 @@ export function AppShell({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Socket subscriptions for notifications and unread
-  useEffect(() => {
-    if (!socket) return;
-
-    socket.emit("join-workspace", workspace.id);
-
-    const handleNotification = (notif: any) => {
-      addNotification(notif);
-    };
-
-    // Increment unread for messages in channels user isn't viewing
-    const handleNewMessage = (msg: any) => {
-      if (msg.channelId && !window.location.pathname.includes(msg.channelId)) {
-        incrementUnread(msg.channelId);
-      }
-    };
-
-    socket.on("notification:new", handleNotification);
-    socket.on("message:new", handleNewMessage);
-
-    return () => {
-      socket.off("notification:new", handleNotification);
-      socket.off("message:new", handleNewMessage);
-    };
-  }, [socket, workspace.id, addNotification, incrementUnread]);
+  // Supabase Realtime handles notifications and message sync per-component
+  // No global socket subscriptions needed
 
   return (
     <div className="h-screen flex overflow-hidden bg-[#1a0321]">

@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { auditLogs, users } from "@/db/schema";
-import { eq, and, desc } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 interface LogActionInput {
   workspaceId: string;
@@ -14,19 +13,24 @@ interface LogActionInput {
 }
 
 export async function logAction(input: LogActionInput) {
-  const [log] = await db
-    .insert(auditLogs)
-    .values({
-      workspaceId: input.workspaceId,
-      actorUserId: input.actorUserId,
+  const supabase = createClient(await cookies());
+
+  const { data: log, error } = await supabase
+    .from("audit_logs")
+    .insert({
+      workspace_id: input.workspaceId,
+      actor_user_id: input.actorUserId,
       action: input.action,
-      entityType: input.entityType,
-      entityId: input.entityId,
+      entity_type: input.entityType,
+      entity_id: input.entityId,
       changes: input.changes,
-      ipAddress: input.ipAddress,
-      userAgent: input.userAgent,
+      ip_address: input.ipAddress,
+      user_agent: input.userAgent,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return log;
 }
@@ -43,43 +47,46 @@ export async function getAuditLogs(
   workspaceId: string,
   filters?: AuditLogFilters
 ) {
+  const supabase = createClient(await cookies());
   const limit = filters?.limit ?? 50;
   const offset = filters?.offset ?? 0;
 
-  const conditions = [eq(auditLogs.workspaceId, workspaceId)];
+  let query = supabase
+    .from("audit_logs")
+    .select("id, workspace_id, actor_user_id, action, entity_type, entity_id, changes, ip_address, user_agent, created_at, users:actor_user_id(username, display_name, avatar_url)")
+    .eq("workspace_id", workspaceId);
 
   if (filters?.action) {
-    conditions.push(eq(auditLogs.action, filters.action));
+    query = query.eq("action", filters.action);
   }
   if (filters?.actorUserId) {
-    conditions.push(eq(auditLogs.actorUserId, filters.actorUserId));
+    query = query.eq("actor_user_id", filters.actorUserId);
   }
   if (filters?.entityType) {
-    conditions.push(eq(auditLogs.entityType, filters.entityType));
+    query = query.eq("entity_type", filters.entityType);
   }
 
-  const logs = await db
-    .select({
-      id: auditLogs.id,
-      workspaceId: auditLogs.workspaceId,
-      actorUserId: auditLogs.actorUserId,
-      action: auditLogs.action,
-      entityType: auditLogs.entityType,
-      entityId: auditLogs.entityId,
-      changes: auditLogs.changes,
-      ipAddress: auditLogs.ipAddress,
-      userAgent: auditLogs.userAgent,
-      createdAt: auditLogs.createdAt,
-      actorUsername: users.username,
-      actorDisplayName: users.displayName,
-      actorAvatarUrl: users.avatarUrl,
-    })
-    .from(auditLogs)
-    .leftJoin(users, eq(users.id, auditLogs.actorUserId))
-    .where(and(...conditions))
-    .orderBy(desc(auditLogs.createdAt))
-    .limit(limit)
-    .offset(offset);
+  query = query
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
 
-  return logs;
+  const { data, error } = await query;
+
+  if (error) throw new Error(error.message);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    actorUserId: row.actor_user_id,
+    action: row.action,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    changes: row.changes,
+    ipAddress: row.ip_address,
+    userAgent: row.user_agent,
+    createdAt: row.created_at,
+    actorUsername: row.users?.username,
+    actorDisplayName: row.users?.display_name,
+    actorAvatarUrl: row.users?.avatar_url,
+  }));
 }

@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { messageAttachments } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { nanoid } from "nanoid";
@@ -22,25 +21,36 @@ export async function uploadFile(
   const buffer = Buffer.from(await file.arrayBuffer());
   await writeFile(filePath, buffer);
 
-  const [attachment] = await db
-    .insert(messageAttachments)
-    .values({
-      messageId,
-      userId,
-      workspaceId,
-      fileName: file.name,
-      fileSizeBytes: file.size,
-      mimeType: file.type || "application/octet-stream",
-      storageUrl: `/api/files/${storedName}`,
+  const supabase = createClient(await cookies());
+
+  const { data: attachment, error } = await supabase
+    .from("message_attachments")
+    .insert({
+      message_id: messageId,
+      user_id: userId,
+      workspace_id: workspaceId,
+      file_name: file.name,
+      file_size_bytes: file.size,
+      mime_type: file.type || "application/octet-stream",
+      storage_url: `/api/files/${storedName}`,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return attachment;
 }
 
 export async function getAttachments(messageId: string) {
-  return db
-    .select()
-    .from(messageAttachments)
-    .where(eq(messageAttachments.messageId, messageId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("message_attachments")
+    .select("*")
+    .eq("message_id", messageId);
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }

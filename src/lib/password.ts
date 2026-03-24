@@ -1,14 +1,17 @@
-import bcrypt from "bcryptjs";
+// Password hashing is now handled by Supabase Auth.
+// These functions are kept as no-ops for backward compatibility.
 
-const SALT_ROUNDS = 12;
-
-export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, SALT_ROUNDS);
+export async function hashPassword(_password: string): Promise<string> {
+  throw new Error(
+    "Password hashing is managed by Supabase Auth. Do not call this directly."
+  );
 }
 
 export async function verifyPassword(
-  password: string,
-  hash: string
+  _password: string,
+  _hash: string
 ): Promise<boolean> {
-  return bcrypt.compare(password, hash);
+  throw new Error(
+    "Password verification is managed by Supabase Auth. Do not call this directly."
+  );
 }

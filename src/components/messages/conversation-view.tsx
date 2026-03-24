@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useSocket } from "@/hooks/use-socket";
+import { useRealtimeTable } from "@/hooks/use-realtime";
 import { useThreadStore } from "@/stores/thread-store";
 import { useUIStore } from "@/stores/ui-store";
 import { MessageItem } from "./message-item";
@@ -74,7 +74,6 @@ export function ConversationView({
   channel: Channel;
   workspace: Workspace;
 }) {
-  const { socket } = useSocket();
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
@@ -121,51 +120,43 @@ export function ConversationView({
     }
   }, [messages, shouldScrollToBottom]);
 
-  useEffect(() => {
-    if (!socket) return;
-    socket.emit("join-conversation", channel.id);
-
-    const handleNewMessage = (message: Message) => {
-      if (message.channelId === channel.id && !message.threadId) {
+  // Supabase Realtime — subscribe to message changes for this channel
+  useRealtimeTable(
+    "messages",
+    { column: "channel_id", value: channel.id },
+    // onInsert
+    (newMsg) => {
+      if (!newMsg.thread_id) {
         setMessages((prev) => {
-          // Deduplicate — skip if already added optimistically
-          if (prev.some((m) => m.id === message.id)) return prev;
-          return [...prev, message];
+          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          // Fetch user info for the new message
+          fetch(`/api/messages?channelId=${channel.id}&limit=1`)
+            .then((r) => r.json())
+            .then((data) => {
+              if (data.messages?.length > 0) {
+                const latest = data.messages[data.messages.length - 1];
+                setMessages((p) => {
+                  if (p.some((m) => m.id === latest.id)) return p;
+                  return [...p, latest];
+                });
+              }
+            });
+          return prev;
         });
         setShouldScrollToBottom(true);
       }
-      if (message.threadId) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === message.threadId
-              ? { ...m, replyCount: m.replyCount + 1 }
-              : m
-          )
-        );
-      }
-    };
-
-    const handleMessageUpdated = (updated: any) => {
+    },
+    // onUpdate
+    (updated) => {
       setMessages((prev) =>
         prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m))
       );
-    };
-
-    const handleMessageDeleted = (data: { messageId: string }) => {
-      setMessages((prev) => prev.filter((m) => m.id !== data.messageId));
-    };
-
-    socket.on("message:new", handleNewMessage);
-    socket.on("message:updated", handleMessageUpdated);
-    socket.on("message:deleted", handleMessageDeleted);
-
-    return () => {
-      socket.emit("leave-conversation", channel.id);
-      socket.off("message:new", handleNewMessage);
-      socket.off("message:updated", handleMessageUpdated);
-      socket.off("message:deleted", handleMessageDeleted);
-    };
-  }, [socket, channel.id]);
+    },
+    // onDelete
+    (old) => {
+      setMessages((prev) => prev.filter((m) => m.id !== old.id));
+    }
+  );
 
   function handleScroll() {
     const container = scrollContainerRef.current;

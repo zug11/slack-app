@@ -1,7 +1,5 @@
-import { db } from "@/db";
-import { notifications } from "@/db/schema";
-import { eq, and, desc } from "drizzle-orm";
-import { emitToUser } from "@/realtime/emitter";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 interface CreateNotificationInput {
   userId: string;
@@ -16,24 +14,25 @@ interface CreateNotificationInput {
 }
 
 export async function createNotification(input: CreateNotificationInput) {
-  const [notif] = await db
-    .insert(notifications)
-    .values({
-      userId: input.userId,
-      workspaceId: input.workspaceId,
+  const supabase = createClient(await cookies());
+
+  const { data: notif, error } = await supabase
+    .from("notifications")
+    .insert({
+      user_id: input.userId,
+      workspace_id: input.workspaceId,
       type: input.type,
       title: input.title,
       body: input.body,
-      actorUserId: input.actorUserId,
-      entityType: input.entityType,
-      entityId: input.entityId,
+      actor_user_id: input.actorUserId,
+      entity_type: input.entityType,
+      entity_id: input.entityId,
       metadata: input.metadata,
     })
-    .returning();
+    .select()
+    .single();
 
-  try {
-    emitToUser(input.userId, "notification:new", notif);
-  } catch {}
+  if (error) throw new Error(error.message);
 
   return notif;
 }
@@ -43,55 +42,66 @@ export async function getNotifications(
   workspaceId: string,
   limit = 50
 ) {
-  return db
-    .select()
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.userId, userId),
-        eq(notifications.workspaceId, workspaceId)
-      )
-    )
-    .orderBy(desc(notifications.createdAt))
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("notifications")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
     .limit(limit);
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }
 
 export async function getUnreadNotificationCount(
   userId: string,
   workspaceId: string
 ) {
-  const result = await db
-    .select()
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.userId, userId),
-        eq(notifications.workspaceId, workspaceId),
-        eq(notifications.isRead, false)
-      )
-    );
-  return result.length;
+  const supabase = createClient(await cookies());
+
+  const { count, error } = await supabase
+    .from("notifications")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("is_read", false);
+
+  if (error) throw new Error(error.message);
+
+  return count || 0;
 }
 
 export async function markNotificationRead(notificationId: string) {
-  await db
-    .update(notifications)
-    .set({ isRead: true, readAt: new Date(), updatedAt: new Date() })
-    .where(eq(notifications.id, notificationId));
+  const supabase = createClient(await cookies());
+
+  await supabase
+    .from("notifications")
+    .update({
+      is_read: true,
+      read_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", notificationId);
 }
 
 export async function markAllNotificationsRead(
   userId: string,
   workspaceId: string
 ) {
-  await db
-    .update(notifications)
-    .set({ isRead: true, readAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(notifications.userId, userId),
-        eq(notifications.workspaceId, workspaceId),
-        eq(notifications.isRead, false)
-      )
-    );
+  const supabase = createClient(await cookies());
+
+  await supabase
+    .from("notifications")
+    .update({
+      is_read: true,
+      read_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("is_read", false);
 }

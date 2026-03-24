@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
-import { useSocket } from "./use-socket";
+import { useRealtimeTable } from "./use-realtime";
 import { usePresenceStore } from "@/stores/presence-store";
 
 export function usePresence(workspaceId: string) {
-  const { socket } = useSocket();
   const { setPresence, bulkSetPresences } = usePresenceStore();
 
   // Fetch initial presences
@@ -26,20 +25,15 @@ export function usePresence(workspaceId: string) {
     fetchPresences();
   }, [workspaceId, bulkSetPresences]);
 
-  // Subscribe to real-time updates
-  useEffect(() => {
-    if (!socket) return;
-
-    const handlePresenceUpdate = (data: {
-      userId: string;
-      status: string;
-    }) => {
-      setPresence(data.userId, data.status as any);
-    };
-
-    socket.on("presence:update", handlePresenceUpdate);
-    return () => {
-      socket.off("presence:update", handlePresenceUpdate);
-    };
-  }, [socket, setPresence]);
+  // Subscribe to real-time presence updates via Supabase
+  useRealtimeTable(
+    "user_presences",
+    { column: "workspace_id", value: workspaceId },
+    (newRecord) => {
+      setPresence(newRecord.user_id, newRecord.status);
+    },
+    (updated) => {
+      setPresence(updated.user_id, updated.status);
+    }
+  );
 }

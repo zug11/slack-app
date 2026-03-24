@@ -1,48 +1,30 @@
-import { db } from "@/db";
-import { messageReactions, messages } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
-import { emitToConversation } from "@/realtime/emitter";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function addReaction(
   messageId: string,
   userId: string,
   emoji: string
 ) {
-  const [existing] = await db
-    .select({ id: messageReactions.id })
-    .from(messageReactions)
-    .where(
-      and(
-        eq(messageReactions.messageId, messageId),
-        eq(messageReactions.userId, userId),
-        eq(messageReactions.emoji, emoji)
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: existing } = await supabase
+    .from("message_reactions")
+    .select("id")
+    .eq("message_id", messageId)
+    .eq("user_id", userId)
+    .eq("emoji", emoji)
+    .maybeSingle();
 
   if (existing) return existing;
 
-  const [reaction] = await db
-    .insert(messageReactions)
-    .values({ messageId, userId, emoji })
-    .returning();
+  const { data: reaction, error } = await supabase
+    .from("message_reactions")
+    .insert({ message_id: messageId, user_id: userId, emoji })
+    .select()
+    .single();
 
-  const [msg] = await db
-    .select({ channelId: messages.channelId })
-    .from(messages)
-    .where(eq(messages.id, messageId))
-    .limit(1);
-
-  if (msg) {
-    try {
-      emitToConversation(msg.channelId, "reaction:added", {
-        messageId,
-        userId,
-        emoji,
-        reactionId: reaction.id,
-      });
-    } catch {}
-  }
+  if (error) throw new Error(error.message);
 
   return reaction;
 }
@@ -52,41 +34,25 @@ export async function removeReaction(
   userId: string,
   emoji: string
 ) {
-  await db
-    .delete(messageReactions)
-    .where(
-      and(
-        eq(messageReactions.messageId, messageId),
-        eq(messageReactions.userId, userId),
-        eq(messageReactions.emoji, emoji)
-      )
-    );
+  const supabase = createClient(await cookies());
 
-  const [msg] = await db
-    .select({ channelId: messages.channelId })
-    .from(messages)
-    .where(eq(messages.id, messageId))
-    .limit(1);
-
-  if (msg) {
-    try {
-      emitToConversation(msg.channelId, "reaction:removed", {
-        messageId,
-        userId,
-        emoji,
-      });
-    } catch {}
-  }
+  await supabase
+    .from("message_reactions")
+    .delete()
+    .eq("message_id", messageId)
+    .eq("user_id", userId)
+    .eq("emoji", emoji);
 }
 
 export async function getMessageReactions(messageId: string) {
-  return db
-    .select({
-      id: messageReactions.id,
-      emoji: messageReactions.emoji,
-      userId: messageReactions.userId,
-      createdAt: messageReactions.createdAt,
-    })
-    .from(messageReactions)
-    .where(eq(messageReactions.messageId, messageId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("message_reactions")
+    .select("id, emoji, user_id, created_at")
+    .eq("message_id", messageId);
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }

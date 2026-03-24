@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { userBlocks, users } from "@/db/schema";
-import { eq, and, or } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { AppError } from "@/lib/errors";
 
 export async function blockUser(blockerUserId: string, blockedUserId: string) {
@@ -8,28 +7,29 @@ export async function blockUser(blockerUserId: string, blockedUserId: string) {
     throw new AppError("Cannot block yourself", 400);
   }
 
-  const [existing] = await db
-    .select()
-    .from(userBlocks)
-    .where(
-      and(
-        eq(userBlocks.blockerUserId, blockerUserId),
-        eq(userBlocks.blockedUserId, blockedUserId)
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: existing } = await supabase
+    .from("user_blocks")
+    .select("*")
+    .eq("blocker_user_id", blockerUserId)
+    .eq("blocked_user_id", blockedUserId)
+    .maybeSingle();
 
   if (existing) {
     throw new AppError("User already blocked", 409);
   }
 
-  const [block] = await db
-    .insert(userBlocks)
-    .values({
-      blockerUserId,
-      blockedUserId,
+  const { data: block, error } = await supabase
+    .from("user_blocks")
+    .insert({
+      blocker_user_id: blockerUserId,
+      blocked_user_id: blockedUserId,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new AppError(error.message, 500);
 
   return block;
 }
@@ -38,17 +38,17 @@ export async function unblockUser(
   blockerUserId: string,
   blockedUserId: string
 ) {
-  const [deleted] = await db
-    .delete(userBlocks)
-    .where(
-      and(
-        eq(userBlocks.blockerUserId, blockerUserId),
-        eq(userBlocks.blockedUserId, blockedUserId)
-      )
-    )
-    .returning();
+  const supabase = createClient(await cookies());
 
-  if (!deleted) {
+  const { data: deleted, error } = await supabase
+    .from("user_blocks")
+    .delete()
+    .eq("blocker_user_id", blockerUserId)
+    .eq("blocked_user_id", blockedUserId)
+    .select()
+    .single();
+
+  if (error || !deleted) {
     throw new AppError("Block not found", 404);
   }
 
@@ -56,42 +56,47 @@ export async function unblockUser(
 }
 
 export async function getBlockedUsers(userId: string) {
-  const blocks = await db
-    .select({
-      id: userBlocks.id,
-      blockedUserId: userBlocks.blockedUserId,
-      createdAt: userBlocks.createdAt,
-      blockedUsername: users.username,
-      blockedDisplayName: users.displayName,
-      blockedAvatarUrl: users.avatarUrl,
-    })
-    .from(userBlocks)
-    .leftJoin(users, eq(users.id, userBlocks.blockedUserId))
-    .where(eq(userBlocks.blockerUserId, userId));
+  const supabase = createClient(await cookies());
 
-  return blocks;
+  const { data, error } = await supabase
+    .from("user_blocks")
+    .select("id, blocked_user_id, created_at, users:blocked_user_id(username, display_name, avatar_url)")
+    .eq("blocker_user_id", userId);
+
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    blockedUserId: row.blocked_user_id,
+    createdAt: row.created_at,
+    blockedUsername: row.users?.username,
+    blockedDisplayName: row.users?.display_name,
+    blockedAvatarUrl: row.users?.avatar_url,
+  }));
 }
 
 export async function isBlocked(
   userId1: string,
   userId2: string
 ): Promise<boolean> {
-  const [block] = await db
-    .select({ id: userBlocks.id })
-    .from(userBlocks)
-    .where(
-      or(
-        and(
-          eq(userBlocks.blockerUserId, userId1),
-          eq(userBlocks.blockedUserId, userId2)
-        ),
-        and(
-          eq(userBlocks.blockerUserId, userId2),
-          eq(userBlocks.blockedUserId, userId1)
-        )
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
 
-  return !!block;
+  // Check both directions
+  const { data: block1 } = await supabase
+    .from("user_blocks")
+    .select("id")
+    .eq("blocker_user_id", userId1)
+    .eq("blocked_user_id", userId2)
+    .maybeSingle();
+
+  if (block1) return true;
+
+  const { data: block2 } = await supabase
+    .from("user_blocks")
+    .select("id")
+    .eq("blocker_user_id", userId2)
+    .eq("blocked_user_id", userId1)
+    .maybeSingle();
+
+  return !!block2;
 }

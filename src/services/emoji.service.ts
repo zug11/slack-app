@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { emojiCustom, users } from "@/db/schema";
-import { eq, and, ilike } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { AppError } from "@/lib/errors";
 
 export async function uploadEmoji(
@@ -10,27 +9,36 @@ export async function uploadEmoji(
   imageUrl: string,
   isAnimated?: boolean
 ) {
-  const [emoji] = await db
-    .insert(emojiCustom)
-    .values({
-      workspaceId,
-      createdByUserId: userId,
+  const supabase = createClient(await cookies());
+
+  const { data: emoji, error } = await supabase
+    .from("emoji_custom")
+    .insert({
+      workspace_id: workspaceId,
+      created_by_user_id: userId,
       name,
-      imageUrl,
-      isAnimated: isAnimated ?? false,
+      image_url: imageUrl,
+      is_animated: isAnimated ?? false,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new AppError(error.message, 500);
 
   return emoji;
 }
 
 export async function deleteEmoji(id: string) {
-  const [deleted] = await db
-    .delete(emojiCustom)
-    .where(eq(emojiCustom.id, id))
-    .returning();
+  const supabase = createClient(await cookies());
 
-  if (!deleted) {
+  const { data: deleted, error } = await supabase
+    .from("emoji_custom")
+    .delete()
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error || !deleted) {
     throw new AppError("Emoji not found", 404);
   }
 
@@ -38,42 +46,48 @@ export async function deleteEmoji(id: string) {
 }
 
 export async function getWorkspaceEmojis(workspaceId: string) {
-  return db
-    .select({
-      id: emojiCustom.id,
-      workspaceId: emojiCustom.workspaceId,
-      name: emojiCustom.name,
-      imageUrl: emojiCustom.imageUrl,
-      isAnimated: emojiCustom.isAnimated,
-      createdByUserId: emojiCustom.createdByUserId,
-      createdAt: emojiCustom.createdAt,
-      creatorUsername: users.username,
-      creatorDisplayName: users.displayName,
-    })
-    .from(emojiCustom)
-    .leftJoin(users, eq(users.id, emojiCustom.createdByUserId))
-    .where(eq(emojiCustom.workspaceId, workspaceId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("emoji_custom")
+    .select("id, workspace_id, name, image_url, is_animated, created_by_user_id, created_at, users:created_by_user_id(username, display_name)")
+    .eq("workspace_id", workspaceId);
+
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    imageUrl: row.image_url,
+    isAnimated: row.is_animated,
+    createdByUserId: row.created_by_user_id,
+    createdAt: row.created_at,
+    creatorUsername: row.users?.username,
+    creatorDisplayName: row.users?.display_name,
+  }));
 }
 
 export async function searchEmojis(workspaceId: string, query: string) {
-  return db
-    .select({
-      id: emojiCustom.id,
-      workspaceId: emojiCustom.workspaceId,
-      name: emojiCustom.name,
-      imageUrl: emojiCustom.imageUrl,
-      isAnimated: emojiCustom.isAnimated,
-      createdByUserId: emojiCustom.createdByUserId,
-      createdAt: emojiCustom.createdAt,
-      creatorUsername: users.username,
-      creatorDisplayName: users.displayName,
-    })
-    .from(emojiCustom)
-    .leftJoin(users, eq(users.id, emojiCustom.createdByUserId))
-    .where(
-      and(
-        eq(emojiCustom.workspaceId, workspaceId),
-        ilike(emojiCustom.name, `%${query}%`)
-      )
-    );
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("emoji_custom")
+    .select("id, workspace_id, name, image_url, is_animated, created_by_user_id, created_at, users:created_by_user_id(username, display_name)")
+    .eq("workspace_id", workspaceId)
+    .ilike("name", `%${query}%`);
+
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    imageUrl: row.image_url,
+    isAnimated: row.is_animated,
+    createdByUserId: row.created_by_user_id,
+    createdAt: row.created_at,
+    creatorUsername: row.users?.username,
+    creatorDisplayName: row.users?.display_name,
+  }));
 }

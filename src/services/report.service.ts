@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { messageReports, users, messages } from "@/db/schema";
-import { eq, and, desc } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { AppError } from "@/lib/errors";
 
 export async function reportMessage(
@@ -11,60 +10,64 @@ export async function reportMessage(
   reason: string,
   details?: string
 ) {
-  const [report] = await db
-    .insert(messageReports)
-    .values({
-      workspaceId,
-      reporterUserId,
-      messageId,
-      dmMessageId,
+  const supabase = createClient(await cookies());
+
+  const { data: report, error } = await supabase
+    .from("message_reports")
+    .insert({
+      workspace_id: workspaceId,
+      reporter_user_id: reporterUserId,
+      message_id: messageId,
+      dm_message_id: dmMessageId,
       reason,
       details,
       status: "pending",
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new AppError(error.message, 500);
 
   return report;
 }
 
 export async function getReports(workspaceId: string, status?: string) {
-  const conditions = [eq(messageReports.workspaceId, workspaceId)];
+  const supabase = createClient(await cookies());
+
+  let query = supabase
+    .from("message_reports")
+    .select("id, workspace_id, reporter_user_id, message_id, dm_message_id, reason, details, status, resolved_by_user_id, resolved_at, resolution_note, created_at, users:reporter_user_id(username, display_name, avatar_url), messages:message_id(content, user_id)")
+    .eq("workspace_id", workspaceId);
 
   if (status) {
-    conditions.push(eq(messageReports.status, status));
+    query = query.eq("status", status);
   }
 
-  const reporterUser = {
-    reporterUsername: users.username,
-    reporterDisplayName: users.displayName,
-    reporterAvatarUrl: users.avatarUrl,
-  };
+  query = query.order("created_at", { ascending: false });
 
-  const reports = await db
-    .select({
-      id: messageReports.id,
-      workspaceId: messageReports.workspaceId,
-      reporterUserId: messageReports.reporterUserId,
-      messageId: messageReports.messageId,
-      dmMessageId: messageReports.dmMessageId,
-      reason: messageReports.reason,
-      details: messageReports.details,
-      status: messageReports.status,
-      resolvedByUserId: messageReports.resolvedByUserId,
-      resolvedAt: messageReports.resolvedAt,
-      resolutionNote: messageReports.resolutionNote,
-      createdAt: messageReports.createdAt,
-      ...reporterUser,
-      messageContent: messages.content,
-      messageUserId: messages.userId,
-    })
-    .from(messageReports)
-    .leftJoin(users, eq(users.id, messageReports.reporterUserId))
-    .leftJoin(messages, eq(messages.id, messageReports.messageId))
-    .where(and(...conditions))
-    .orderBy(desc(messageReports.createdAt));
+  const { data, error } = await query;
 
-  return reports;
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    reporterUserId: row.reporter_user_id,
+    messageId: row.message_id,
+    dmMessageId: row.dm_message_id,
+    reason: row.reason,
+    details: row.details,
+    status: row.status,
+    resolvedByUserId: row.resolved_by_user_id,
+    resolvedAt: row.resolved_at,
+    resolutionNote: row.resolution_note,
+    createdAt: row.created_at,
+    reporterUsername: row.users?.username,
+    reporterDisplayName: row.users?.display_name,
+    reporterAvatarUrl: row.users?.avatar_url,
+    messageContent: row.messages?.content,
+    messageUserId: row.messages?.user_id,
+  }));
 }
 
 export async function resolveReport(
@@ -72,19 +75,22 @@ export async function resolveReport(
   resolvedByUserId: string,
   resolutionNote: string
 ) {
-  const [updated] = await db
-    .update(messageReports)
-    .set({
-      status: "resolved",
-      resolvedByUserId,
-      resolvedAt: new Date(),
-      resolutionNote,
-      updatedAt: new Date(),
-    })
-    .where(eq(messageReports.id, reportId))
-    .returning();
+  const supabase = createClient(await cookies());
 
-  if (!updated) {
+  const { data: updated, error } = await supabase
+    .from("message_reports")
+    .update({
+      status: "resolved",
+      resolved_by_user_id: resolvedByUserId,
+      resolved_at: new Date().toISOString(),
+      resolution_note: resolutionNote,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", reportId)
+    .select()
+    .single();
+
+  if (error || !updated) {
     throw new AppError("Report not found", 404);
   }
 
@@ -95,18 +101,21 @@ export async function dismissReport(
   reportId: string,
   resolvedByUserId: string
 ) {
-  const [updated] = await db
-    .update(messageReports)
-    .set({
-      status: "dismissed",
-      resolvedByUserId,
-      resolvedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(messageReports.id, reportId))
-    .returning();
+  const supabase = createClient(await cookies());
 
-  if (!updated) {
+  const { data: updated, error } = await supabase
+    .from("message_reports")
+    .update({
+      status: "dismissed",
+      resolved_by_user_id: resolvedByUserId,
+      resolved_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", reportId)
+    .select()
+    .single();
+
+  if (error || !updated) {
     throw new AppError("Report not found", 404);
   }
 

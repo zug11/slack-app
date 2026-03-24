@@ -1,32 +1,24 @@
-import { db } from "@/db";
-import {
-  workspaceMembers,
-  memberRoles,
-  roles,
-  channelPermissionOverwrites,
-} from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { ROLE_DEFAULTS, type Permission } from "@/lib/permissions";
 
 /**
  * Get all permissions for a user in a workspace.
- * Combines: workspace member role defaults + custom roles from memberRoles table.
+ * Combines: workspace member role defaults + custom roles from member_roles table.
  */
 export async function getUserPermissions(
   userId: string,
   workspaceId: string
 ): Promise<Permission[]> {
+  const supabase = createClient(await cookies());
+
   // Get workspace membership
-  const [membership] = await db
-    .select({ id: workspaceMembers.id, role: workspaceMembers.role })
-    .from(workspaceMembers)
-    .where(
-      and(
-        eq(workspaceMembers.userId, userId),
-        eq(workspaceMembers.workspaceId, workspaceId)
-      )
-    )
-    .limit(1);
+  const { data: membership } = await supabase
+    .from("workspace_members")
+    .select("id, role")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
 
   if (!membership) return [];
 
@@ -35,15 +27,14 @@ export async function getUserPermissions(
     ROLE_DEFAULTS[membership.role] || ROLE_DEFAULTS.member
   );
 
-  // Add custom role permissions from memberRoles → roles
-  const customRoles = await db
-    .select({ permissions: roles.permissions })
-    .from(memberRoles)
-    .innerJoin(roles, eq(roles.id, memberRoles.roleId))
-    .where(eq(memberRoles.workspaceMemberId, membership.id));
+  // Add custom role permissions from member_roles -> roles
+  const { data: customRoles } = await supabase
+    .from("member_roles")
+    .select("roles:role_id(permissions)")
+    .eq("workspace_member_id", membership.id);
 
-  for (const role of customRoles) {
-    const perms = role.permissions as Permission[];
+  for (const row of customRoles || []) {
+    const perms = (row.roles as any)?.permissions as Permission[];
     if (Array.isArray(perms)) {
       for (const p of perms) basePerms.add(p);
     }
@@ -74,6 +65,8 @@ export async function hasChannelPermission(
   permission: Permission,
   workspaceId: string
 ): Promise<boolean> {
+  const supabase = createClient(await cookies());
+
   // First check workspace-level permission
   const hasWorkspacePerm = await checkPermission(
     userId,
@@ -82,68 +75,50 @@ export async function hasChannelPermission(
   );
 
   // Check channel-level overwrites for this user
-  const [userOverwrite] = await db
-    .select({
-      allowPermissions: channelPermissionOverwrites.allowPermissions,
-      denyPermissions: channelPermissionOverwrites.denyPermissions,
-    })
-    .from(channelPermissionOverwrites)
-    .where(
-      and(
-        eq(channelPermissionOverwrites.channelId, channelId),
-        eq(channelPermissionOverwrites.targetType, "user"),
-        eq(channelPermissionOverwrites.targetUserId, userId)
-      )
-    )
-    .limit(1);
+  const { data: userOverwrite } = await supabase
+    .from("channel_permission_overwrites")
+    .select("allow_permissions, deny_permissions")
+    .eq("channel_id", channelId)
+    .eq("target_type", "user")
+    .eq("target_user_id", userId)
+    .maybeSingle();
 
   if (userOverwrite) {
-    const deny = userOverwrite.denyPermissions as string[];
+    const deny = userOverwrite.deny_permissions as string[];
     if (Array.isArray(deny) && deny.includes(permission)) return false;
 
-    const allow = userOverwrite.allowPermissions as string[];
+    const allow = userOverwrite.allow_permissions as string[];
     if (Array.isArray(allow) && allow.includes(permission)) return true;
   }
 
   // Check role-based overwrites
-  const [membership] = await db
-    .select({ id: workspaceMembers.id })
-    .from(workspaceMembers)
-    .where(
-      and(
-        eq(workspaceMembers.userId, userId),
-        eq(workspaceMembers.workspaceId, workspaceId)
-      )
-    )
-    .limit(1);
+  const { data: membership } = await supabase
+    .from("workspace_members")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
 
   if (membership) {
-    const userRoles = await db
-      .select({ roleId: memberRoles.roleId })
-      .from(memberRoles)
-      .where(eq(memberRoles.workspaceMemberId, membership.id));
+    const { data: userRoles } = await supabase
+      .from("member_roles")
+      .select("role_id")
+      .eq("workspace_member_id", membership.id);
 
-    for (const ur of userRoles) {
-      const [roleOverwrite] = await db
-        .select({
-          allowPermissions: channelPermissionOverwrites.allowPermissions,
-          denyPermissions: channelPermissionOverwrites.denyPermissions,
-        })
-        .from(channelPermissionOverwrites)
-        .where(
-          and(
-            eq(channelPermissionOverwrites.channelId, channelId),
-            eq(channelPermissionOverwrites.targetType, "role"),
-            eq(channelPermissionOverwrites.targetRoleId, ur.roleId)
-          )
-        )
-        .limit(1);
+    for (const ur of userRoles || []) {
+      const { data: roleOverwrite } = await supabase
+        .from("channel_permission_overwrites")
+        .select("allow_permissions, deny_permissions")
+        .eq("channel_id", channelId)
+        .eq("target_type", "role")
+        .eq("target_role_id", ur.role_id)
+        .maybeSingle();
 
       if (roleOverwrite) {
-        const deny = roleOverwrite.denyPermissions as string[];
+        const deny = roleOverwrite.deny_permissions as string[];
         if (Array.isArray(deny) && deny.includes(permission)) return false;
 
-        const allow = roleOverwrite.allowPermissions as string[];
+        const allow = roleOverwrite.allow_permissions as string[];
         if (Array.isArray(allow) && allow.includes(permission)) return true;
       }
     }

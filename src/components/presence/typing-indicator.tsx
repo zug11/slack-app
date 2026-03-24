@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSocket } from "@/hooks/use-socket";
+import { useBroadcast } from "@/hooks/use-realtime";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
 interface TypingUser {
@@ -15,22 +15,16 @@ export function TypingIndicator({
 }: {
   conversationId: string;
 }) {
-  const { socket } = useSocket();
   const user = useCurrentUser();
   const [typingUsers, setTypingUsers] = useState<Map<string, TypingUser>>(
     new Map()
   );
 
-  useEffect(() => {
-    if (!socket) return;
+  const { onBroadcast } = useBroadcast(`typing:${conversationId}`);
 
-    const handleTypingStart = (data: {
-      conversationId: string;
-      userId: string;
-      displayName: string;
-    }) => {
-      if (data.conversationId !== conversationId || data.userId === user.id)
-        return;
+  useEffect(() => {
+    onBroadcast("typing:start", (data: any) => {
+      if (data.userId === user.id) return;
       setTypingUsers((prev) => {
         const next = new Map(prev);
         const existing = next.get(data.userId);
@@ -42,20 +36,12 @@ export function TypingIndicator({
             return n;
           });
         }, 4000);
-        next.set(data.userId, {
-          userId: data.userId,
-          displayName: data.displayName,
-          timeout,
-        });
+        next.set(data.userId, { userId: data.userId, displayName: data.displayName || "Someone", timeout });
         return next;
       });
-    };
+    });
 
-    const handleTypingStop = (data: {
-      conversationId: string;
-      userId: string;
-    }) => {
-      if (data.conversationId !== conversationId) return;
+    onBroadcast("typing:stop", (data: any) => {
       setTypingUsers((prev) => {
         const next = new Map(prev);
         const existing = next.get(data.userId);
@@ -63,16 +49,8 @@ export function TypingIndicator({
         next.delete(data.userId);
         return next;
       });
-    };
-
-    socket.on("typing:start", handleTypingStart);
-    socket.on("typing:stop", handleTypingStop);
-
-    return () => {
-      socket.off("typing:start", handleTypingStart);
-      socket.off("typing:stop", handleTypingStop);
-    };
-  }, [socket, conversationId, user.id]);
+    });
+  }, [conversationId, user.id]);
 
   const names = Array.from(typingUsers.values()).map((u) => u.displayName);
 

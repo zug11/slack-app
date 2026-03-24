@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { handleApiError } from "@/lib/errors";
-import { db } from "@/db";
-import { users } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function GET() {
   try {
@@ -18,17 +17,15 @@ export async function PATCH(request: NextRequest) {
   try {
     const user = await requireAuth();
     const body = await request.json();
+    const supabase = createClient(await cookies());
 
-    const updates: Record<string, any> = {};
-    if (body.displayName) updates.displayName = body.displayName;
+    const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (body.displayName) updates.display_name = body.displayName;
     if (body.bio !== undefined) updates.bio = body.bio;
     if (body.timezone) updates.timezone = body.timezone;
-    if (body.avatarUrl !== undefined) updates.avatarUrl = body.avatarUrl;
+    if (body.avatarUrl !== undefined) updates.avatar_url = body.avatarUrl;
 
-    if (Object.keys(updates).length > 0) {
-      updates.updatedAt = new Date();
-      await db.update(users).set(updates).where(eq(users.id, user.id));
-    }
+    await supabase.from("users").update(updates).eq("id", user.id);
 
     return NextResponse.json({ success: true });
   } catch (error) {

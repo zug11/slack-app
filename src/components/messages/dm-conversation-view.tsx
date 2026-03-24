@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useSocket } from "@/hooks/use-socket";
+import { useRealtimeTable } from "@/hooks/use-realtime";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import { Avatar } from "@/components/ui/avatar";
 import { format, isToday, isYesterday } from "date-fns";
@@ -39,7 +39,7 @@ function formatDateDivider(dateStr: string): string {
 }
 
 export function DMConversationView({ channel }: { channel: DMChannel }) {
-  const { socket } = useSocket();
+  // Supabase Realtime for DMs
   const user = useCurrentUser();
   const [messages, setMessages] = useState<DMMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,21 +81,15 @@ export function DMConversationView({ channel }: { channel: DMChannel }) {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Listen for new DMs
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleNewDM = (msg: DMMessage) => {
-      if (msg.dmChannelId === channel.id) {
-        setMessages((prev) => [...prev, msg]);
-      }
-    };
-
-    socket.on("dm:new", handleNewDM);
-    return () => {
-      socket.off("dm:new", handleNewDM);
-    };
-  }, [socket, channel.id]);
+  // Supabase Realtime for new DMs
+  useRealtimeTable(
+    "direct_messages",
+    { column: "dm_channel_id", value: channel.id },
+    () => {
+      // Re-fetch on new DM to get user info
+      fetchMessages();
+    }
+  );
 
   async function handleSend() {
     const trimmed = content.trim();

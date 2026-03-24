@@ -1,67 +1,67 @@
-import { db } from "@/db";
-import { pinnedMessages, messages } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
-import { emitToConversation } from "@/realtime/emitter";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function pinMessage(
   channelId: string,
   messageId: string,
   userId: string
 ) {
+  const supabase = createClient(await cookies());
+
   // Check if already pinned
-  const [existing] = await db
-    .select({ id: pinnedMessages.id })
-    .from(pinnedMessages)
-    .where(
-      and(
-        eq(pinnedMessages.channelId, channelId),
-        eq(pinnedMessages.messageId, messageId)
-      )
-    )
-    .limit(1);
+  const { data: existing } = await supabase
+    .from("pinned_messages")
+    .select("id")
+    .eq("channel_id", channelId)
+    .eq("message_id", messageId)
+    .maybeSingle();
 
   if (existing) return existing;
 
-  const [pin] = await db
-    .insert(pinnedMessages)
-    .values({ channelId, messageId, pinnedByUserId: userId })
-    .returning();
+  const { data: pin, error } = await supabase
+    .from("pinned_messages")
+    .insert({
+      channel_id: channelId,
+      message_id: messageId,
+      pinned_by_user_id: userId,
+    })
+    .select()
+    .single();
 
-  await db
-    .update(messages)
-    .set({ isPinned: true })
-    .where(eq(messages.id, messageId));
+  if (error) throw new Error(error.message);
 
-  try {
-    emitToConversation(channelId, "message:pinned", { messageId });
-  } catch {}
+  await supabase
+    .from("messages")
+    .update({ is_pinned: true })
+    .eq("id", messageId);
 
   return pin;
 }
 
 export async function unpinMessage(channelId: string, messageId: string) {
-  await db
-    .delete(pinnedMessages)
-    .where(
-      and(
-        eq(pinnedMessages.channelId, channelId),
-        eq(pinnedMessages.messageId, messageId)
-      )
-    );
+  const supabase = createClient(await cookies());
 
-  await db
-    .update(messages)
-    .set({ isPinned: false })
-    .where(eq(messages.id, messageId));
+  await supabase
+    .from("pinned_messages")
+    .delete()
+    .eq("channel_id", channelId)
+    .eq("message_id", messageId);
 
-  try {
-    emitToConversation(channelId, "message:unpinned", { messageId });
-  } catch {}
+  await supabase
+    .from("messages")
+    .update({ is_pinned: false })
+    .eq("id", messageId);
 }
 
 export async function getPinnedMessages(channelId: string) {
-  return db
-    .select()
-    .from(pinnedMessages)
-    .where(eq(pinnedMessages.channelId, channelId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("pinned_messages")
+    .select("*")
+    .eq("channel_id", channelId);
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }

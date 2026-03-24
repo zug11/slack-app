@@ -1,7 +1,5 @@
-import { db } from "@/db";
-import { roles, memberRoles, workspaceMembers } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
-import { AppError } from "@/lib/errors";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import type { Permission } from "@/lib/permissions";
 
 export async function createRole(
@@ -11,16 +9,21 @@ export async function createRole(
   color?: string,
   isMentionable?: boolean
 ) {
-  const [role] = await db
-    .insert(roles)
-    .values({
-      workspaceId,
+  const supabase = createClient(await cookies());
+
+  const { data: role, error } = await supabase
+    .from("roles")
+    .insert({
+      workspace_id: workspaceId,
       name,
       permissions,
       color,
-      isMentionable: isMentionable ?? true,
+      is_mentionable: isMentionable ?? true,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
   return role;
 }
 
@@ -34,56 +37,71 @@ export async function updateRole(
     sortOrder?: number;
   }
 ) {
-  const setValues: Record<string, any> = { updatedAt: new Date() };
+  const supabase = createClient(await cookies());
+
+  const setValues: Record<string, any> = {
+    updated_at: new Date().toISOString(),
+  };
   if (updates.name !== undefined) setValues.name = updates.name;
   if (updates.permissions !== undefined) setValues.permissions = updates.permissions;
   if (updates.color !== undefined) setValues.color = updates.color;
-  if (updates.isMentionable !== undefined) setValues.isMentionable = updates.isMentionable;
-  if (updates.sortOrder !== undefined) setValues.sortOrder = updates.sortOrder;
+  if (updates.isMentionable !== undefined) setValues.is_mentionable = updates.isMentionable;
+  if (updates.sortOrder !== undefined) setValues.sort_order = updates.sortOrder;
 
-  const [role] = await db
-    .update(roles)
-    .set(setValues)
-    .where(eq(roles.id, roleId))
-    .returning();
+  const { data: role, error } = await supabase
+    .from("roles")
+    .update(setValues)
+    .eq("id", roleId)
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
   return role;
 }
 
 export async function deleteRole(roleId: string) {
+  const supabase = createClient(await cookies());
+
   // Delete member-role assignments first
-  await db.delete(memberRoles).where(eq(memberRoles.roleId, roleId));
-  await db.delete(roles).where(eq(roles.id, roleId));
+  await supabase.from("member_roles").delete().eq("role_id", roleId);
+  await supabase.from("roles").delete().eq("id", roleId);
 }
 
 export async function getWorkspaceRoles(workspaceId: string) {
-  return db
-    .select()
-    .from(roles)
-    .where(eq(roles.workspaceId, workspaceId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("roles")
+    .select("*")
+    .eq("workspace_id", workspaceId);
+
+  if (error) throw new Error(error.message);
+  return data || [];
 }
 
 export async function assignRole(
   workspaceMemberId: string,
   roleId: string
 ) {
+  const supabase = createClient(await cookies());
+
   // Check if already assigned
-  const [existing] = await db
-    .select({ id: memberRoles.id })
-    .from(memberRoles)
-    .where(
-      and(
-        eq(memberRoles.workspaceMemberId, workspaceMemberId),
-        eq(memberRoles.roleId, roleId)
-      )
-    )
-    .limit(1);
+  const { data: existing } = await supabase
+    .from("member_roles")
+    .select("id")
+    .eq("workspace_member_id", workspaceMemberId)
+    .eq("role_id", roleId)
+    .maybeSingle();
 
   if (existing) return existing;
 
-  const [assignment] = await db
-    .insert(memberRoles)
-    .values({ workspaceMemberId, roleId })
-    .returning();
+  const { data: assignment, error } = await supabase
+    .from("member_roles")
+    .insert({ workspace_member_id: workspaceMemberId, role_id: roleId })
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
   return assignment;
 }
 
@@ -91,25 +109,29 @@ export async function removeRole(
   workspaceMemberId: string,
   roleId: string
 ) {
-  await db
-    .delete(memberRoles)
-    .where(
-      and(
-        eq(memberRoles.workspaceMemberId, workspaceMemberId),
-        eq(memberRoles.roleId, roleId)
-      )
-    );
+  const supabase = createClient(await cookies());
+
+  await supabase
+    .from("member_roles")
+    .delete()
+    .eq("workspace_member_id", workspaceMemberId)
+    .eq("role_id", roleId);
 }
 
 export async function getMemberRoles(workspaceMemberId: string) {
-  return db
-    .select({
-      id: roles.id,
-      name: roles.name,
-      color: roles.color,
-      permissions: roles.permissions,
-    })
-    .from(memberRoles)
-    .innerJoin(roles, eq(roles.id, memberRoles.roleId))
-    .where(eq(memberRoles.workspaceMemberId, workspaceMemberId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("member_roles")
+    .select("roles:role_id(id, name, color, permissions)")
+    .eq("workspace_member_id", workspaceMemberId);
+
+  if (error) throw new Error(error.message);
+
+  return (data || []).map((row: any) => ({
+    id: row.roles?.id,
+    name: row.roles?.name,
+    color: row.roles?.color,
+    permissions: row.roles?.permissions,
+  }));
 }

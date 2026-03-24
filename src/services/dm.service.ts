@@ -1,47 +1,39 @@
-import { db } from "@/db";
-import {
-  directMessageChannels,
-  directMessageMembers,
-  directMessages,
-  users,
-} from "@/db/schema";
-import { eq, and, desc, lt, isNull, sql } from "drizzle-orm";
-import { emitToUser } from "@/realtime/emitter";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function findOrCreateDM(
   workspaceId: string,
   userIds: string[]
 ) {
+  const supabase = createClient(await cookies());
+
   // Check for existing DM between these users
   if (userIds.length === 2) {
-    const existing = await db
-      .select({ dmChannelId: directMessageMembers.dmChannelId })
-      .from(directMessageMembers)
-      .where(eq(directMessageMembers.userId, userIds[0]));
+    const { data: myMemberships } = await supabase
+      .from("direct_message_members")
+      .select("dm_channel_id")
+      .eq("user_id", userIds[0]);
 
-    for (const row of existing) {
-      const members = await db
-        .select({ userId: directMessageMembers.userId })
-        .from(directMessageMembers)
-        .where(eq(directMessageMembers.dmChannelId, row.dmChannelId));
+    for (const row of myMemberships || []) {
+      const { data: members } = await supabase
+        .from("direct_message_members")
+        .select("user_id")
+        .eq("dm_channel_id", row.dm_channel_id);
 
-      const memberIds = members.map((m) => m.userId);
+      const memberIds = (members || []).map((m: any) => m.user_id);
       if (
         memberIds.length === 2 &&
         memberIds.includes(userIds[0]) &&
         memberIds.includes(userIds[1])
       ) {
         // Check it's in the right workspace
-        const [ch] = await db
-          .select()
-          .from(directMessageChannels)
-          .where(
-            and(
-              eq(directMessageChannels.id, row.dmChannelId),
-              eq(directMessageChannels.workspaceId, workspaceId)
-            )
-          )
-          .limit(1);
+        const { data: ch } = await supabase
+          .from("direct_message_channels")
+          .select("*")
+          .eq("id", row.dm_channel_id)
+          .eq("workspace_id", workspaceId)
+          .maybeSingle();
+
         if (ch) return ch;
       }
     }
@@ -49,15 +41,18 @@ export async function findOrCreateDM(
 
   // Create new DM channel
   const type = userIds.length > 2 ? "group_dm" : "dm";
-  const [channel] = await db
-    .insert(directMessageChannels)
-    .values({ workspaceId, type })
-    .returning();
+  const { data: channel, error } = await supabase
+    .from("direct_message_channels")
+    .insert({ workspace_id: workspaceId, type })
+    .select()
+    .single();
 
-  await db.insert(directMessageMembers).values(
+  if (error) throw new Error(error.message);
+
+  await supabase.from("direct_message_members").insert(
     userIds.map((userId) => ({
-      dmChannelId: channel.id,
-      userId,
+      dm_channel_id: channel.id,
+      user_id: userId,
     }))
   );
 
@@ -65,45 +60,45 @@ export async function findOrCreateDM(
 }
 
 export async function getUserDMChannels(workspaceId: string, userId: string) {
-  const myMemberships = await db
-    .select({ dmChannelId: directMessageMembers.dmChannelId })
-    .from(directMessageMembers)
-    .where(eq(directMessageMembers.userId, userId));
+  const supabase = createClient(await cookies());
+
+  const { data: myMemberships } = await supabase
+    .from("direct_message_members")
+    .select("dm_channel_id")
+    .eq("user_id", userId);
 
   const results = [];
-  for (const m of myMemberships) {
-    const [channel] = await db
-      .select()
-      .from(directMessageChannels)
-      .where(
-        and(
-          eq(directMessageChannels.id, m.dmChannelId),
-          eq(directMessageChannels.workspaceId, workspaceId)
-        )
-      )
-      .limit(1);
+  for (const m of myMemberships || []) {
+    const { data: channel } = await supabase
+      .from("direct_message_channels")
+      .select("*")
+      .eq("id", m.dm_channel_id)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
 
     if (!channel) continue;
 
-    // Get other members
-    const members = await db
-      .select({
-        userId: directMessageMembers.userId,
-        displayName: users.displayName,
-        username: users.username,
-        avatarUrl: users.avatarUrl,
-      })
-      .from(directMessageMembers)
-      .innerJoin(users, eq(users.id, directMessageMembers.userId))
-      .where(eq(directMessageMembers.dmChannelId, channel.id));
+    // Get other members with user info
+    const { data: members } = await supabase
+      .from("direct_message_members")
+      .select("user_id, users:user_id(display_name, username, avatar_url)")
+      .eq("dm_channel_id", channel.id);
 
-    const otherMembers = members.filter((mm) => mm.userId !== userId);
+    const otherMembers = (members || [])
+      .filter((mm: any) => mm.user_id !== userId)
+      .map((mm: any) => ({
+        userId: mm.user_id,
+        displayName: mm.users?.display_name,
+        username: mm.users?.username,
+        avatarUrl: mm.users?.avatar_url,
+      }));
 
     results.push({
       ...channel,
       members: otherMembers,
       displayName:
-        otherMembers.map((m) => m.displayName).join(", ") || "Direct Message",
+        otherMembers.map((m: any) => m.displayName).join(", ") ||
+        "Direct Message",
     });
   }
 
@@ -115,91 +110,91 @@ export async function sendDM(
   userId: string,
   content: string
 ) {
-  const [message] = await db
-    .insert(directMessages)
-    .values({ dmChannelId, userId, content })
-    .returning();
+  const supabase = createClient(await cookies());
+
+  const { data: message, error: insertError } = await supabase
+    .from("direct_messages")
+    .insert({ dm_channel_id: dmChannelId, user_id: userId, content })
+    .select()
+    .single();
+
+  if (insertError) throw new Error(insertError.message);
 
   // Update last_message_at
-  await db
-    .update(directMessageChannels)
-    .set({ lastMessageAt: message.createdAt, updatedAt: new Date() })
-    .where(eq(directMessageChannels.id, dmChannelId));
+  await supabase
+    .from("direct_message_channels")
+    .update({
+      last_message_at: message.created_at,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", dmChannelId);
 
   // Fetch with user info
-  const [fullMessage] = await db
-    .select({
-      id: directMessages.id,
-      dmChannelId: directMessages.dmChannelId,
-      userId: directMessages.userId,
-      content: directMessages.content,
-      type: directMessages.type,
-      isEdited: directMessages.isEdited,
-      createdAt: directMessages.createdAt,
-      displayName: users.displayName,
-      username: users.username,
-      avatarUrl: users.avatarUrl,
-    })
-    .from(directMessages)
-    .innerJoin(users, eq(users.id, directMessages.userId))
-    .where(eq(directMessages.id, message.id))
-    .limit(1);
+  const { data: fullMessage } = await supabase
+    .from("direct_messages")
+    .select("id, dm_channel_id, user_id, content, type, is_edited, created_at, users:user_id(display_name, username, avatar_url)")
+    .eq("id", message.id)
+    .single();
 
-  // Emit to all members
-  const members = await db
-    .select({ userId: directMessageMembers.userId })
-    .from(directMessageMembers)
-    .where(eq(directMessageMembers.dmChannelId, dmChannelId));
+  if (!fullMessage) return message;
 
-  for (const member of members) {
-    try {
-      emitToUser(member.userId, "dm:new", fullMessage);
-    } catch {}
-  }
-
-  return fullMessage;
+  return {
+    id: fullMessage.id,
+    dmChannelId: fullMessage.dm_channel_id,
+    userId: fullMessage.user_id,
+    content: fullMessage.content,
+    type: fullMessage.type,
+    isEdited: fullMessage.is_edited,
+    createdAt: fullMessage.created_at,
+    displayName: (fullMessage.users as any)?.display_name,
+    username: (fullMessage.users as any)?.username,
+    avatarUrl: (fullMessage.users as any)?.avatar_url,
+  };
 }
 
 export async function getDMMessages(
   dmChannelId: string,
   options: { cursor?: string; limit?: number } = {}
 ) {
+  const supabase = createClient(await cookies());
   const limit = Math.min(options.limit || 50, 100);
 
-  const conditions = [
-    eq(directMessages.dmChannelId, dmChannelId),
-    isNull(directMessages.deletedAt),
-  ];
+  let query = supabase
+    .from("direct_messages")
+    .select("id, dm_channel_id, user_id, content, type, is_edited, created_at, users:user_id(display_name, username, avatar_url)")
+    .eq("dm_channel_id", dmChannelId)
+    .is("deleted_at", null);
 
   if (options.cursor) {
-    conditions.push(lt(directMessages.createdAt, new Date(options.cursor)));
+    query = query.lt("created_at", options.cursor);
   }
 
-  const result = await db
-    .select({
-      id: directMessages.id,
-      dmChannelId: directMessages.dmChannelId,
-      userId: directMessages.userId,
-      content: directMessages.content,
-      type: directMessages.type,
-      isEdited: directMessages.isEdited,
-      createdAt: directMessages.createdAt,
-      displayName: users.displayName,
-      username: users.username,
-      avatarUrl: users.avatarUrl,
-    })
-    .from(directMessages)
-    .innerJoin(users, eq(users.id, directMessages.userId))
-    .where(and(...conditions))
-    .orderBy(desc(directMessages.createdAt))
-    .limit(limit + 1);
+  query = query.order("created_at", { ascending: false }).limit(limit + 1);
 
-  const hasMore = result.length > limit;
-  const items = hasMore ? result.slice(0, limit) : result;
+  const { data: result, error } = await query;
+
+  if (error) throw new Error(error.message);
+
+  const rows = result || [];
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+
+  const mapped = items.map((row: any) => ({
+    id: row.id,
+    dmChannelId: row.dm_channel_id,
+    userId: row.user_id,
+    content: row.content,
+    type: row.type,
+    isEdited: row.is_edited,
+    createdAt: row.created_at,
+    displayName: row.users?.display_name,
+    username: row.users?.username,
+    avatarUrl: row.users?.avatar_url,
+  }));
 
   return {
-    messages: items.reverse(),
+    messages: mapped.reverse(),
     hasMore,
-    cursor: items.length > 0 ? items[0].createdAt?.toISOString() : null,
+    cursor: mapped.length > 0 ? mapped[0].createdAt : null,
   };
 }

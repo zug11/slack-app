@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { polls, pollOptions, pollVotes, messages } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { sendMessage } from "@/services/message.service";
 
 export async function createPoll(
@@ -16,6 +15,8 @@ export async function createPoll(
     throw new Error("A poll requires at least 2 options");
   }
 
+  const supabase = createClient(await cookies());
+
   // Create a message of type 'poll'
   const message = await sendMessage({
     channelId,
@@ -25,35 +26,41 @@ export async function createPoll(
   });
 
   // Create the poll record
-  const [poll] = await db
-    .insert(polls)
-    .values({
-      messageId: message.id,
-      createdByUserId: userId,
+  const { data: poll, error: pollError } = await supabase
+    .from("polls")
+    .insert({
+      message_id: message.id,
+      created_by_user_id: userId,
       question,
-      isAnonymous,
-      isMultipleChoice,
-      expiresAt: expiresAt || null,
+      is_anonymous: isAnonymous,
+      is_multiple_choice: isMultipleChoice,
+      expires_at: expiresAt ? expiresAt.toISOString() : null,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (pollError) throw new Error(pollError.message);
 
   // Insert poll options
-  const optionRecords = await Promise.all(
-    options.map((text, index) =>
-      db
-        .insert(pollOptions)
-        .values({
-          pollId: poll.id,
-          text,
-          sortOrder: index,
-        })
-        .returning()
-    )
-  );
+  const optionRecords = [];
+  for (let i = 0; i < options.length; i++) {
+    const { data: opt, error: optError } = await supabase
+      .from("poll_options")
+      .insert({
+        poll_id: poll.id,
+        text: options[i],
+        sort_order: i,
+      })
+      .select()
+      .single();
+
+    if (optError) throw new Error(optError.message);
+    optionRecords.push(opt);
+  }
 
   return {
     ...poll,
-    options: optionRecords.map((r) => r[0]),
+    options: optionRecords,
   };
 }
 
@@ -62,65 +69,68 @@ export async function vote(
   optionId: string,
   userId: string
 ) {
+  const supabase = createClient(await cookies());
+
   // Fetch the poll
-  const [poll] = await db
-    .select()
-    .from(polls)
-    .where(eq(polls.id, pollId))
-    .limit(1);
+  const { data: poll } = await supabase
+    .from("polls")
+    .select("*")
+    .eq("id", pollId)
+    .single();
 
   if (!poll) {
     throw new Error("Poll not found");
   }
 
   // Check if poll has expired
-  if (poll.expiresAt && poll.expiresAt < new Date()) {
+  if (poll.expires_at && new Date(poll.expires_at) < new Date()) {
     throw new Error("Poll has expired");
   }
 
   // Verify the option belongs to this poll
-  const [option] = await db
-    .select()
-    .from(pollOptions)
-    .where(
-      and(eq(pollOptions.id, optionId), eq(pollOptions.pollId, pollId))
-    )
-    .limit(1);
+  const { data: option } = await supabase
+    .from("poll_options")
+    .select("*")
+    .eq("id", optionId)
+    .eq("poll_id", pollId)
+    .maybeSingle();
 
   if (!option) {
     throw new Error("Poll option not found");
   }
 
   // Check existing votes
-  const existingVotes = await db
-    .select()
-    .from(pollVotes)
-    .where(
-      and(eq(pollVotes.pollId, pollId), eq(pollVotes.userId, userId))
-    );
+  const { data: existingVotes } = await supabase
+    .from("poll_votes")
+    .select("*")
+    .eq("poll_id", pollId)
+    .eq("user_id", userId);
 
-  if (!poll.isMultipleChoice && existingVotes.length > 0) {
+  if (!poll.is_multiple_choice && (existingVotes || []).length > 0) {
     throw new Error(
       "You have already voted. This poll does not allow multiple choices."
     );
   }
 
   // Check if already voted for this specific option
-  const alreadyVotedOption = existingVotes.find(
-    (v) => v.pollOptionId === optionId
+  const alreadyVotedOption = (existingVotes || []).find(
+    (v: any) => v.poll_option_id === optionId
   );
   if (alreadyVotedOption) {
     throw new Error("You have already voted for this option");
   }
 
-  const [voteRecord] = await db
-    .insert(pollVotes)
-    .values({
-      pollId,
-      pollOptionId: optionId,
-      userId,
+  const { data: voteRecord, error } = await supabase
+    .from("poll_votes")
+    .insert({
+      poll_id: pollId,
+      poll_option_id: optionId,
+      user_id: userId,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return voteRecord;
 }
@@ -130,48 +140,58 @@ export async function removeVote(
   optionId: string,
   userId: string
 ) {
-  const [existing] = await db
-    .select()
-    .from(pollVotes)
-    .where(
-      and(
-        eq(pollVotes.pollId, pollId),
-        eq(pollVotes.pollOptionId, optionId),
-        eq(pollVotes.userId, userId)
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: existing } = await supabase
+    .from("poll_votes")
+    .select("*")
+    .eq("poll_id", pollId)
+    .eq("poll_option_id", optionId)
+    .eq("user_id", userId)
+    .maybeSingle();
 
   if (!existing) {
     throw new Error("Vote not found");
   }
 
-  await db.delete(pollVotes).where(eq(pollVotes.id, existing.id));
+  await supabase.from("poll_votes").delete().eq("id", existing.id);
 }
 
 export async function getPollResults(pollId: string) {
-  const [poll] = await db
-    .select()
-    .from(polls)
-    .where(eq(polls.id, pollId))
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: poll } = await supabase
+    .from("polls")
+    .select("*")
+    .eq("id", pollId)
+    .single();
 
   if (!poll) {
     throw new Error("Poll not found");
   }
 
-  const options = await db
-    .select({
-      id: pollOptions.id,
-      text: pollOptions.text,
-      sortOrder: pollOptions.sortOrder,
-      voteCount: sql<number>`count(${pollVotes.id})::int`,
-    })
-    .from(pollOptions)
-    .leftJoin(pollVotes, eq(pollVotes.pollOptionId, pollOptions.id))
-    .where(eq(pollOptions.pollId, pollId))
-    .groupBy(pollOptions.id, pollOptions.text, pollOptions.sortOrder)
-    .orderBy(pollOptions.sortOrder);
+  // Get options
+  const { data: optionsData } = await supabase
+    .from("poll_options")
+    .select("id, text, sort_order")
+    .eq("poll_id", pollId)
+    .order("sort_order", { ascending: true });
+
+  // Count votes per option
+  const options = [];
+  for (const opt of optionsData || []) {
+    const { count } = await supabase
+      .from("poll_votes")
+      .select("id", { count: "exact", head: true })
+      .eq("poll_option_id", opt.id);
+
+    options.push({
+      id: opt.id,
+      text: opt.text,
+      sortOrder: opt.sort_order,
+      voteCount: count || 0,
+    });
+  }
 
   const totalVotes = options.reduce((sum, opt) => sum + opt.voteCount, 0);
 

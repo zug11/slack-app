@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { useSocket } from "@/hooks/use-socket";
+import { useRealtimeTable } from "@/hooks/use-realtime";
 import { useThreadStore } from "@/stores/thread-store";
 import { MessageItem } from "@/components/messages/message-item";
 import { MessageComposer } from "@/components/messages/message-composer";
@@ -24,7 +24,6 @@ interface Message {
 }
 
 export function ThreadPanel() {
-  const { socket } = useSocket();
   const { openThreadId, closeThread } = useThreadStore();
   const [replies, setReplies] = useState<Message[]>([]);
   const [channelId, setChannelId] = useState<string>("");
@@ -53,25 +52,25 @@ export function ThreadPanel() {
     fetchThread();
   }, [openThreadId]);
 
-  useEffect(() => {
-    if (!socket || !openThreadId) return;
-    socket.emit("join-thread", openThreadId);
-
-    const handleNewMessage = (message: Message) => {
-      if (message.threadId === openThreadId) {
-        setReplies((prev) => [...prev, message]);
-        setChannelId(message.channelId);
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  // Supabase Realtime for thread replies
+  useRealtimeTable(
+    "messages",
+    { column: "thread_id", value: openThreadId || "" },
+    (newMsg) => {
+      // Re-fetch to get user info
+      if (openThreadId) {
+        fetch(`/api/messages/${openThreadId}/thread?limit=100`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.messages) {
+              setReplies(data.messages);
+              setChannelId(data.messages[0]?.channelId || "");
+            }
+          });
       }
-    };
-
-    socket.on("message:new", handleNewMessage);
-
-    return () => {
-      socket.emit("leave-thread", openThreadId);
-      socket.off("message:new", handleNewMessage);
-    };
-  }, [socket, openThreadId]);
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  );
 
   if (!openThreadId) return null;
 

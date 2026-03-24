@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { reminders } from "@/db/schema";
-import { eq, and, lte, desc } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { createNotification } from "@/services/notification.service";
 
 export async function createReminder(
@@ -11,90 +10,100 @@ export async function createReminder(
   text: string,
   remindAt: Date
 ) {
-  const [reminder] = await db
-    .insert(reminders)
-    .values({
-      userId,
-      workspaceId,
-      messageId,
-      dmMessageId,
+  const supabase = createClient(await cookies());
+
+  const { data: reminder, error } = await supabase
+    .from("reminders")
+    .insert({
+      user_id: userId,
+      workspace_id: workspaceId,
+      message_id: messageId,
+      dm_message_id: dmMessageId,
       text,
-      remindAt,
+      remind_at: remindAt.toISOString(),
       status: "pending",
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return reminder;
 }
 
 export async function cancelReminder(id: string, userId: string) {
-  const [reminder] = await db
-    .select()
-    .from(reminders)
-    .where(
-      and(
-        eq(reminders.id, id),
-        eq(reminders.userId, userId),
-        eq(reminders.status, "pending")
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: reminder } = await supabase
+    .from("reminders")
+    .select("*")
+    .eq("id", id)
+    .eq("user_id", userId)
+    .eq("status", "pending")
+    .maybeSingle();
 
   if (!reminder) {
     throw new Error("Reminder not found or already sent/cancelled");
   }
 
-  const [updated] = await db
-    .update(reminders)
-    .set({ status: "cancelled", updatedAt: new Date() })
-    .where(eq(reminders.id, id))
-    .returning();
+  const { data: updated, error } = await supabase
+    .from("reminders")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return updated;
 }
 
 export async function getReminders(userId: string, workspaceId: string) {
-  return db
-    .select()
-    .from(reminders)
-    .where(
-      and(
-        eq(reminders.userId, userId),
-        eq(reminders.workspaceId, workspaceId),
-        eq(reminders.status, "pending")
-      )
-    )
-    .orderBy(desc(reminders.remindAt));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("reminders")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("status", "pending")
+    .order("remind_at", { ascending: false });
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }
 
 export async function processReminders() {
-  const now = new Date();
+  const supabase = createClient(await cookies());
+  const now = new Date().toISOString();
 
-  const due = await db
-    .select()
-    .from(reminders)
-    .where(
-      and(eq(reminders.status, "pending"), lte(reminders.remindAt, now))
-    );
+  const { data: due, error } = await supabase
+    .from("reminders")
+    .select("*")
+    .eq("status", "pending")
+    .lte("remind_at", now);
+
+  if (error) throw new Error(error.message);
 
   const results: { id: string; status: string; error?: string }[] = [];
 
-  for (const reminder of due) {
+  for (const reminder of due || []) {
     try {
       await createNotification({
-        userId: reminder.userId,
-        workspaceId: reminder.workspaceId,
+        userId: reminder.user_id,
+        workspaceId: reminder.workspace_id,
         type: "reminder",
         title: "Reminder",
         body: reminder.text,
-        entityType: reminder.messageId ? "message" : undefined,
-        entityId: reminder.messageId || undefined,
+        entityType: reminder.message_id ? "message" : undefined,
+        entityId: reminder.message_id || undefined,
       });
 
-      await db
-        .update(reminders)
-        .set({ status: "sent", updatedAt: new Date() })
-        .where(eq(reminders.id, reminder.id));
+      await supabase
+        .from("reminders")
+        .update({ status: "sent", updated_at: new Date().toISOString() })
+        .eq("id", reminder.id);
 
       results.push({ id: reminder.id, status: "sent" });
     } catch (error) {

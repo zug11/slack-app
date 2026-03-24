@@ -1,54 +1,49 @@
-import { db } from "@/db";
-import { userPresences } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function setOnline(userId: string, workspaceId: string) {
-  const [existing] = await db
-    .select({ id: userPresences.id })
-    .from(userPresences)
-    .where(
-      and(
-        eq(userPresences.userId, userId),
-        eq(userPresences.workspaceId, workspaceId)
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: existing } = await supabase
+    .from("user_presences")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
 
   if (existing) {
-    await db
-      .update(userPresences)
-      .set({
+    await supabase
+      .from("user_presences")
+      .update({
         status: "online",
-        lastSeenAt: new Date(),
-        clientType: "web",
-        updatedAt: new Date(),
+        last_seen_at: new Date().toISOString(),
+        client_type: "web",
+        updated_at: new Date().toISOString(),
       })
-      .where(eq(userPresences.id, existing.id));
+      .eq("id", existing.id);
   } else {
-    await db.insert(userPresences).values({
-      userId,
-      workspaceId,
+    await supabase.from("user_presences").insert({
+      user_id: userId,
+      workspace_id: workspaceId,
       status: "online",
-      lastSeenAt: new Date(),
-      clientType: "web",
+      last_seen_at: new Date().toISOString(),
+      client_type: "web",
     });
   }
 }
 
 export async function setOffline(userId: string, workspaceId: string) {
-  await db
-    .update(userPresences)
-    .set({
+  const supabase = createClient(await cookies());
+
+  await supabase
+    .from("user_presences")
+    .update({
       status: "offline",
-      lastSeenAt: new Date(),
-      updatedAt: new Date(),
+      last_seen_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     })
-    .where(
-      and(
-        eq(userPresences.userId, userId),
-        eq(userPresences.workspaceId, workspaceId)
-      )
-    );
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId);
 }
 
 export async function updateStatus(
@@ -56,24 +51,24 @@ export async function updateStatus(
   workspaceId: string,
   status: string
 ) {
-  await db
-    .update(userPresences)
-    .set({ status, updatedAt: new Date() })
-    .where(
-      and(
-        eq(userPresences.userId, userId),
-        eq(userPresences.workspaceId, workspaceId)
-      )
-    );
+  const supabase = createClient(await cookies());
+
+  await supabase
+    .from("user_presences")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId);
 }
 
 export async function getPresences(workspaceId: string) {
-  return db
-    .select({
-      userId: userPresences.userId,
-      status: userPresences.status,
-      lastSeenAt: userPresences.lastSeenAt,
-    })
-    .from(userPresences)
-    .where(eq(userPresences.workspaceId, workspaceId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("user_presences")
+    .select("user_id, status, last_seen_at")
+    .eq("workspace_id", workspaceId);
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }

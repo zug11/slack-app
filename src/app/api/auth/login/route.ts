@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod/v4";
-import { loginUser } from "@/services/auth.service";
-import { createSession, setSessionCookie } from "@/lib/auth";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { handleApiError } from "@/lib/errors";
 
 const loginSchema = z.object({
@@ -13,18 +13,38 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const input = loginSchema.parse(body);
+    const supabase = createClient(await cookies());
 
-    const user = await loginUser(input);
-    const { token, expiresAt } = await createSession(user.id, request);
-    await setSessionCookie(token, expiresAt);
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: input.email,
+      password: input.password,
+    });
 
-    return NextResponse.json({ user });
+    if (error) {
+      return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
+    }
+
+    // Fetch profile
+    const { data: profile } = await supabase
+      .from("users")
+      .select("id, email, username, display_name, avatar_url")
+      .eq("id", data.user.id)
+      .single();
+
+    return NextResponse.json({
+      user: profile
+        ? {
+            id: profile.id,
+            email: profile.email,
+            username: profile.username,
+            displayName: profile.display_name,
+            avatarUrl: profile.avatar_url,
+          }
+        : { id: data.user.id, email: data.user.email },
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: "Validation failed", details: error.issues },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Validation failed" }, { status: 400 });
     }
     return handleApiError(error);
   }

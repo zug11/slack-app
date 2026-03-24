@@ -1,18 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod/v4";
 import { requireAuth } from "@/lib/auth";
 import { handleApiError } from "@/lib/errors";
-import { checkPermission } from "@/services/permission.service";
-import { PERMISSIONS } from "@/lib/permissions";
-import { db } from "@/db";
-import { workspaces } from "@/db/schema";
-import { eq } from "drizzle-orm";
-
-const updateSchema = z.object({
-  name: z.string().min(1).max(255).optional(),
-  description: z.string().max(2000).optional(),
-  settings: z.record(z.string(), z.unknown()).optional(),
-});
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function GET(
   request: NextRequest,
@@ -21,18 +11,16 @@ export async function GET(
   try {
     await requireAuth();
     const { workspaceId } = await params;
+    const supabase = createClient(await cookies());
 
-    const [workspace] = await db
-      .select()
-      .from(workspaces)
-      .where(eq(workspaces.id, workspaceId))
-      .limit(1);
+    const { data, error } = await supabase
+      .from("workspaces")
+      .select("*")
+      .eq("id", workspaceId)
+      .single();
 
-    if (!workspace) {
-      return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
-    }
-
-    return NextResponse.json({ workspace });
+    if (error || !data) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ workspace: data });
   } catch (error) {
     return handleApiError(error);
   }
@@ -43,44 +31,19 @@ export async function PATCH(
   { params }: { params: Promise<{ workspaceId: string }> }
 ) {
   try {
-    const user = await requireAuth();
+    await requireAuth();
     const { workspaceId } = await params;
-
-    const allowed = await checkPermission(
-      user.id,
-      workspaceId,
-      PERMISSIONS.MANAGE_WORKSPACE
-    );
-    if (!allowed) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-
     const body = await request.json();
-    const input = updateSchema.parse(body);
+    const supabase = createClient(await cookies());
 
-    const setValues: Record<string, any> = { updatedAt: new Date() };
-    if (input.name !== undefined) setValues.name = input.name;
-    if (input.description !== undefined) setValues.description = input.description;
-    if (input.settings !== undefined) setValues.settings = input.settings;
+    const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (body.name) updates.name = body.name;
+    if (body.description !== undefined) updates.description = body.description;
+    if (body.settings) updates.settings = body.settings;
 
-    const [workspace] = await db
-      .update(workspaces)
-      .set(setValues)
-      .where(eq(workspaces.id, workspaceId))
-      .returning();
-
-    if (!workspace) {
-      return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
-    }
-
-    return NextResponse.json({ workspace });
+    await supabase.from("workspaces").update(updates).eq("id", workspaceId);
+    return NextResponse.json({ success: true });
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: "Validation failed", details: error.issues },
-        { status: 400 }
-      );
-    }
     return handleApiError(error);
   }
 }

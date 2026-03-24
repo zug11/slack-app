@@ -1,12 +1,5 @@
-import { db } from "@/db";
-import {
-  workspaces,
-  workspaceMembers,
-  invitations,
-  channels,
-  channelMembers,
-} from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { nanoid } from "nanoid";
 import { AppError } from "@/lib/errors";
 
@@ -15,46 +8,54 @@ export async function createWorkspace(
   slug: string,
   ownerId: string
 ) {
-  const [existing] = await db
-    .select({ id: workspaces.id })
-    .from(workspaces)
-    .where(eq(workspaces.slug, slug))
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: existing } = await supabase
+    .from("workspaces")
+    .select("id")
+    .eq("slug", slug)
+    .maybeSingle();
 
   if (existing) {
     throw new AppError("Workspace slug already taken", 409);
   }
 
-  const [workspace] = await db
-    .insert(workspaces)
-    .values({ name, slug })
-    .returning();
+  const { data: workspace, error: wsError } = await supabase
+    .from("workspaces")
+    .insert({ name, slug })
+    .select()
+    .single();
+
+  if (wsError) throw new AppError(wsError.message, 500);
 
   // Add owner as member
-  await db.insert(workspaceMembers).values({
-    workspaceId: workspace.id,
-    userId: ownerId,
+  await supabase.from("workspace_members").insert({
+    workspace_id: workspace.id,
+    user_id: ownerId,
     role: "owner",
     status: "active",
   });
 
   // Create default #general channel
-  const [general] = await db
-    .insert(channels)
-    .values({
-      workspaceId: workspace.id,
+  const { data: general, error: chError } = await supabase
+    .from("channels")
+    .insert({
+      workspace_id: workspace.id,
       name: "general",
       slug: "general",
       description: "General discussion",
       type: "text",
-      createdByUserId: ownerId,
+      created_by_user_id: ownerId,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (chError) throw new AppError(chError.message, 500);
 
   // Add owner to general channel
-  await db.insert(channelMembers).values({
-    channelId: general.id,
-    userId: ownerId,
+  await supabase.from("channel_members").insert({
+    channel_id: general.id,
+    user_id: ownerId,
     role: "owner",
   });
 
@@ -62,41 +63,56 @@ export async function createWorkspace(
 }
 
 export async function getUserWorkspaces(userId: string) {
-  return db
-    .select({
-      id: workspaces.id,
-      name: workspaces.name,
-      slug: workspaces.slug,
-      logoUrl: workspaces.logoUrl,
-      plan: workspaces.plan,
-      role: workspaceMembers.role,
-    })
-    .from(workspaceMembers)
-    .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
-    .where(eq(workspaceMembers.userId, userId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("workspace_members")
+    .select(
+      "role, workspaces:workspace_id(id, name, slug, logo_url, plan)"
+    )
+    .eq("user_id", userId);
+
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    id: row.workspaces.id,
+    name: row.workspaces.name,
+    slug: row.workspaces.slug,
+    logoUrl: row.workspaces.logo_url,
+    plan: row.workspaces.plan,
+    role: row.role,
+  }));
 }
 
 export async function getWorkspaceBySlug(slug: string) {
-  const [workspace] = await db
-    .select()
-    .from(workspaces)
-    .where(eq(workspaces.slug, slug))
-    .limit(1);
+  const supabase = createClient(await cookies());
 
-  return workspace || null;
+  const { data } = await supabase
+    .from("workspaces")
+    .select("*")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  return data || null;
 }
 
 export async function getWorkspaceMembers(workspaceId: string) {
-  return db
-    .select({
-      membershipId: workspaceMembers.id,
-      userId: workspaceMembers.userId,
-      role: workspaceMembers.role,
-      status: workspaceMembers.status,
-      joinedAt: workspaceMembers.joinedAt,
-    })
-    .from(workspaceMembers)
-    .where(eq(workspaceMembers.workspaceId, workspaceId));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("workspace_members")
+    .select("id, user_id, role, status, joined_at")
+    .eq("workspace_id", workspaceId);
+
+  if (error) throw new AppError(error.message, 500);
+
+  return (data || []).map((row: any) => ({
+    membershipId: row.id,
+    userId: row.user_id,
+    role: row.role,
+    status: row.status,
+    joinedAt: row.joined_at,
+  }));
 }
 
 export async function createWorkspaceInvite(
@@ -105,59 +121,65 @@ export async function createWorkspaceInvite(
   email: string,
   role: string = "member"
 ) {
+  const supabase = createClient(await cookies());
+
   const token = nanoid(32);
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
-  const [invite] = await db
-    .insert(invitations)
-    .values({
-      workspaceId,
-      invitedByUserId,
+  const { data: invite, error } = await supabase
+    .from("invitations")
+    .insert({
+      workspace_id: workspaceId,
+      invited_by_user_id: invitedByUserId,
       email,
       token,
-      expiresAt,
+      expires_at: expiresAt.toISOString(),
       role,
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new AppError(error.message, 500);
 
   return invite;
 }
 
 export async function acceptInvite(token: string, userId: string) {
-  const [invite] = await db
-    .select()
-    .from(invitations)
-    .where(
-      and(eq(invitations.token, token), eq(invitations.status, "pending"))
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: invite } = await supabase
+    .from("invitations")
+    .select("*")
+    .eq("token", token)
+    .eq("status", "pending")
+    .maybeSingle();
 
   if (!invite) {
     throw new AppError("Invalid or expired invite", 404);
   }
 
-  if (invite.expiresAt && invite.expiresAt < new Date()) {
+  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
     throw new AppError("Invite has expired", 410);
   }
 
-  await db.insert(workspaceMembers).values({
-    workspaceId: invite.workspaceId,
-    userId,
+  await supabase.from("workspace_members").insert({
+    workspace_id: invite.workspace_id,
+    user_id: userId,
     role: invite.role,
     status: "active",
-    invitedByUserId: invite.invitedByUserId,
+    invited_by_user_id: invite.invited_by_user_id,
   });
 
-  await db
-    .update(invitations)
-    .set({
+  await supabase
+    .from("invitations")
+    .update({
       status: "accepted",
-      acceptedByUserId: userId,
-      acceptedAt: new Date(),
-      useCount: (invite.useCount || 0) + 1,
+      accepted_by_user_id: userId,
+      accepted_at: new Date().toISOString(),
+      use_count: (invite.use_count || 0) + 1,
     })
-    .where(eq(invitations.id, invite.id));
+    .eq("id", invite.id);
 
-  return invite.workspaceId;
+  return invite.workspace_id;
 }

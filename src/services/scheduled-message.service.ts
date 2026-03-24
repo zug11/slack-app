@@ -1,6 +1,5 @@
-import { db } from "@/db";
-import { scheduledMessages } from "@/db/schema";
-import { eq, and, lte, desc } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 import { sendMessage } from "@/services/message.service";
 
 export async function scheduleMessage(
@@ -15,44 +14,50 @@ export async function scheduleMessage(
     throw new Error("Either channelId or dmChannelId is required");
   }
 
-  const [scheduled] = await db
-    .insert(scheduledMessages)
-    .values({
-      userId,
-      workspaceId,
-      channelId,
-      dmChannelId,
+  const supabase = createClient(await cookies());
+
+  const { data: scheduled, error } = await supabase
+    .from("scheduled_messages")
+    .insert({
+      user_id: userId,
+      workspace_id: workspaceId,
+      channel_id: channelId,
+      dm_channel_id: dmChannelId,
       content,
-      scheduledAt,
+      scheduled_at: scheduledAt.toISOString(),
       status: "pending",
     })
-    .returning();
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return scheduled;
 }
 
 export async function cancelScheduledMessage(id: string, userId: string) {
-  const [msg] = await db
-    .select()
-    .from(scheduledMessages)
-    .where(
-      and(
-        eq(scheduledMessages.id, id),
-        eq(scheduledMessages.userId, userId),
-        eq(scheduledMessages.status, "pending")
-      )
-    )
-    .limit(1);
+  const supabase = createClient(await cookies());
+
+  const { data: msg } = await supabase
+    .from("scheduled_messages")
+    .select("*")
+    .eq("id", id)
+    .eq("user_id", userId)
+    .eq("status", "pending")
+    .maybeSingle();
 
   if (!msg) {
     throw new Error("Scheduled message not found or already sent/cancelled");
   }
 
-  const [updated] = await db
-    .update(scheduledMessages)
-    .set({ status: "cancelled", updatedAt: new Date() })
-    .where(eq(scheduledMessages.id, id))
-    .returning();
+  const { data: updated, error } = await supabase
+    .from("scheduled_messages")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
 
   return updated;
 }
@@ -61,55 +66,56 @@ export async function getScheduledMessages(
   userId: string,
   workspaceId: string
 ) {
-  return db
-    .select()
-    .from(scheduledMessages)
-    .where(
-      and(
-        eq(scheduledMessages.userId, userId),
-        eq(scheduledMessages.workspaceId, workspaceId),
-        eq(scheduledMessages.status, "pending")
-      )
-    )
-    .orderBy(desc(scheduledMessages.scheduledAt));
+  const supabase = createClient(await cookies());
+
+  const { data, error } = await supabase
+    .from("scheduled_messages")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("status", "pending")
+    .order("scheduled_at", { ascending: false });
+
+  if (error) throw new Error(error.message);
+
+  return data || [];
 }
 
 export async function processScheduledMessages() {
-  const now = new Date();
+  const supabase = createClient(await cookies());
+  const now = new Date().toISOString();
 
-  const due = await db
-    .select()
-    .from(scheduledMessages)
-    .where(
-      and(
-        eq(scheduledMessages.status, "pending"),
-        lte(scheduledMessages.scheduledAt, now)
-      )
-    );
+  const { data: due, error } = await supabase
+    .from("scheduled_messages")
+    .select("*")
+    .eq("status", "pending")
+    .lte("scheduled_at", now);
+
+  if (error) throw new Error(error.message);
 
   const results: { id: string; status: string; error?: string }[] = [];
 
-  for (const msg of due) {
+  for (const msg of due || []) {
     try {
-      const targetChannelId = msg.channelId || msg.dmChannelId;
+      const targetChannelId = msg.channel_id || msg.dm_channel_id;
       if (!targetChannelId) {
         throw new Error("No target channel for scheduled message");
       }
 
       await sendMessage({
         channelId: targetChannelId,
-        userId: msg.userId,
+        userId: msg.user_id,
         content: msg.content,
       });
 
-      await db
-        .update(scheduledMessages)
-        .set({
+      await supabase
+        .from("scheduled_messages")
+        .update({
           status: "sent",
-          sentAt: new Date(),
-          updatedAt: new Date(),
+          sent_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         })
-        .where(eq(scheduledMessages.id, msg.id));
+        .eq("id", msg.id);
 
       results.push({ id: msg.id, status: "sent" });
     } catch (error) {

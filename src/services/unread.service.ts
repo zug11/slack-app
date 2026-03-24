@@ -1,55 +1,40 @@
-import { db } from "@/db";
-import { channelMembers, messages, channels } from "@/db/schema";
-import { eq, and, gt, isNull, sql } from "drizzle-orm";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
 
 export async function getUnreadCounts(userId: string, workspaceId: string) {
-  // Get all channels the user is a member of in this workspace, with unread counts
-  const results = await db
-    .select({
-      channelId: channelMembers.channelId,
-      lastReadAt: channelMembers.lastReadAt,
-    })
-    .from(channelMembers)
-    .innerJoin(channels, eq(channels.id, channelMembers.channelId))
-    .where(
-      and(
-        eq(channelMembers.userId, userId),
-        eq(channels.workspaceId, workspaceId),
-        isNull(channels.deletedAt)
-      )
+  const supabase = createClient(await cookies());
+
+  // Get all channels the user is a member of in this workspace
+  const { data: memberships, error: memError } = await supabase
+    .from("channel_members")
+    .select("channel_id, last_read_at, channels:channel_id(workspace_id, deleted_at)")
+    .eq("user_id", userId);
+
+  if (memError) throw new Error(memError.message);
+
+  // Filter to channels in this workspace that aren't deleted
+  const relevantMemberships = (memberships || []).filter((m: any) => {
+    return (
+      m.channels?.workspace_id === workspaceId && m.channels?.deleted_at === null
     );
+  });
 
   const unreads: Record<string, number> = {};
 
-  for (const row of results) {
-    if (!row.lastReadAt) {
-      // Never read — count all messages
-      const [count] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(messages)
-        .where(
-          and(
-            eq(messages.channelId, row.channelId),
-            isNull(messages.deletedAt),
-            isNull(messages.threadId)
-          )
-        );
-      unreads[row.channelId] = count?.count || 0;
-    } else {
-      // Count messages after last read
-      const [count] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(messages)
-        .where(
-          and(
-            eq(messages.channelId, row.channelId),
-            isNull(messages.deletedAt),
-            isNull(messages.threadId),
-            gt(messages.createdAt, row.lastReadAt)
-          )
-        );
-      unreads[row.channelId] = count?.count || 0;
+  for (const row of relevantMemberships) {
+    let query = supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("channel_id", row.channel_id)
+      .is("deleted_at", null)
+      .is("thread_id", null);
+
+    if (row.last_read_at) {
+      query = query.gt("created_at", row.last_read_at);
     }
+
+    const { count } = await query;
+    unreads[row.channel_id] = count || 0;
   }
 
   return unreads;

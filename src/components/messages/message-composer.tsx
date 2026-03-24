@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useSocket } from "@/hooks/use-socket";
+import { useBroadcast } from "@/hooks/use-realtime";
 import { EmojiPickerFull } from "./emoji-picker-full";
 import { SchedulePicker } from "./schedule-picker";
 import { PollCreator } from "./poll-creator";
@@ -49,7 +49,7 @@ export function MessageComposer({
   const [uploading, setUploading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { socket } = useSocket();
+  const { send: broadcastSend } = useBroadcast(`typing:${channelId}`);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const defaultPlaceholder = channelName
@@ -65,11 +65,10 @@ export function MessageComposer({
   }, [content]);
 
   function handleTyping() {
-    if (!socket) return;
-    socket.emit("typing:start", { conversationId: channelId, threadRootId: threadId });
+    broadcastSend("typing:start", { channelId, threadId });
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
-      socket.emit("typing:stop", { conversationId: channelId, threadRootId: threadId });
+      broadcastSend("typing:stop", { channelId, threadId });
     }, 3000);
   }
 
@@ -78,9 +77,7 @@ export function MessageComposer({
     if ((!trimmed && pendingFiles.length === 0) || sending) return;
     setSending(true);
 
-    if (socket) {
-      socket.emit("typing:stop", { conversationId: channelId, threadRootId: threadId });
-    }
+    broadcastSend("typing:stop", { channelId, threadId });
 
     try {
       // Upload files first if any
