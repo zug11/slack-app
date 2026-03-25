@@ -28,16 +28,17 @@ export async function GET(request: Request) {
     const { data, error } = await supabase.auth.exchangeCodeForSession(code);
 
     if (!error && data.user) {
-      // Check if user profile exists
+      const email = data.user.email || "";
+      
+      // Check if user profile exists by email
       const { data: existingUser } = await supabase
         .from("users")
         .select("id")
-        .eq("id", data.user.id)
+        .eq("email", email)
         .maybeSingle();
 
       // If no profile exists, create one from Google data
       if (!existingUser) {
-        const email = data.user.email || "";
         const displayName =
           data.user.user_metadata?.full_name ||
           data.user.user_metadata?.name ||
@@ -48,12 +49,18 @@ export async function GET(request: Request) {
         const username = `${baseUsername}_${Date.now().toString(36)}`;
 
         await supabase.from("users").insert({
-          id: data.user.id,
           email: email,
           username: username,
           display_name: displayName,
           avatar_url: avatarUrl,
+          is_verified: true,
         });
+      } else {
+        // Update last login time for existing users
+        await supabase
+          .from("users")
+          .update({ last_login_at: new Date().toISOString() })
+          .eq("email", email);
       }
 
       const forwardedHost = request.headers.get("x-forwarded-host");
