@@ -32,7 +32,7 @@ export async function updateSession(request: NextRequest) {
 
   // Redirect unauthenticated users to login (except public pages)
   const { pathname } = request.nextUrl;
-  const publicPaths = ["/login", "/register", "/forgot-password"];
+  const publicPaths = ["/login", "/register", "/forgot-password", "/auth/callback", "/auth/auth-error"];
   const isPublic =
     publicPaths.some((p) => pathname.startsWith(p)) ||
     pathname.startsWith("/_next") ||

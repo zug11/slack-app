@@ -1,0 +1,58 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/utils/supabase/server";
+import { cookies } from "next/headers";
+
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url);
+  const code = searchParams.get("code");
+  const next = searchParams.get("next") ?? "/";
+
+  if (code) {
+    const supabase = createClient(await cookies());
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+
+    if (!error && data.user) {
+      // Check if user profile exists
+      const { data: existingUser } = await supabase
+        .from("users")
+        .select("id")
+        .eq("id", data.user.id)
+        .maybeSingle();
+
+      // If no profile exists, create one from Google data
+      if (!existingUser) {
+        const email = data.user.email || "";
+        const displayName =
+          data.user.user_metadata?.full_name ||
+          data.user.user_metadata?.name ||
+          email.split("@")[0];
+        const avatarUrl = data.user.user_metadata?.avatar_url || null;
+        // Generate username from email
+        const baseUsername = email.split("@")[0].replace(/[^a-zA-Z0-9_]/g, "_");
+        const username = `${baseUsername}_${Date.now().toString(36)}`;
+
+        await supabase.from("users").insert({
+          id: data.user.id,
+          email: email,
+          username: username,
+          display_name: displayName,
+          avatar_url: avatarUrl,
+        });
+      }
+
+      const forwardedHost = request.headers.get("x-forwarded-host");
+      const isLocalEnv = process.env.NODE_ENV === "development";
+
+      if (isLocalEnv) {
+        return NextResponse.redirect(`${origin}${next}`);
+      } else if (forwardedHost) {
+        return NextResponse.redirect(`https://${forwardedHost}${next}`);
+      } else {
+        return NextResponse.redirect(`${origin}${next}`);
+      }
+    }
+  }
+
+  // Return the user to an error page with instructions
+  return NextResponse.redirect(`${origin}/auth/auth-error`);
+}
